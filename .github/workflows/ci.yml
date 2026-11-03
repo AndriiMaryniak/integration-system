@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check src/ --exit-zero
+
+      - name: Build image
+        run: docker build -t kws-api:${{ github.sha }} .
+
+      - name: Run container
+        run: |
+          docker run -d --name kws -p 8000:8000 kws-api:${{ github.sha }}
+          # Чекаємо, поки сервер стане healthy
+          for i in $(seq 1 30); do curl -sf http://localhost:8000/health && break; sleep 2; done
+
+      - name: Smoke test
+        run: |
+          curl -sf http://localhost:8000/model-info
+          # Генеруємо валідний порожній .wav файл на 1 секунду для тестування API
+          python -c "import wave, struct; f=wave.open('test.wav', 'w'); f.setnchannels(1); f.setsampwidth(2); f.setframerate(16000); f.writeframes(struct.pack('<h', 0)*16000); f.close()"
+          curl -sf -X POST -F "file=@test.wav" http://localhost:8000/predict
+
+      - name: Accuracy gate
+        run: |
+          ACC=$(curl -s http://localhost:8000/model-info | jq '.accuracy')
+          echo "Current accuracy: $ACC%"
+          # Ставимо поріг 45%, бо наша модель після 1 епохи видає 49%
+          python -c "import sys; sys.exit(0 if $ACC >= 45 else 1)"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs kws
